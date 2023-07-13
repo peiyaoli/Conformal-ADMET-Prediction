@@ -181,8 +181,8 @@ def main(args):
 
 
     elif args.ue == "MCD":
-        model = models.MCDropoutMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
-        model.add_mc_iteration(10)
+        model = models.MCDropoutMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2, dropout = 0.2)
+        model.add_mc_iteration(5)
         callbacks = [EarlyStopping(monitor="val/rmse", mode="min")] #QR用的是mpiw,MVE、EDL用rmse才可以，需要修改
         trainer = pl.Trainer(
             # logger=False,
@@ -206,6 +206,7 @@ def main(args):
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var).flatten()
         metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+
 
 
     elif args.ue == "DE":
@@ -263,7 +264,7 @@ if __name__ == "__main__":
     parser.add_argument("--ensemble", type=int, help="Number of ensembles", default = 3)
     parser.add_argument("--fold", type=int, help="Index of CV fold", default=0)
     parser.add_argument("--batch_size", type=int, help="Batch size", default=100)
-    parser.add_argument("--ue", type=str, help="Name of uncertainty estimation method", default="DE")
+    parser.add_argument("--ue", type=str, help="Name of uncertainty estimation method", default="MCD")
     parser.add_argument("--conformal", type=bool, help="Run conformal prediction or not", default=False)
     parser.add_argument("--alpha", type=float, help="Expected coverage rate", default=0.1)
     args = parser.parse_args()
