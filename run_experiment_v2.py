@@ -114,7 +114,7 @@ def main(args):
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var)
         metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
-
+        print("MVE Done")
         
 
 
@@ -147,6 +147,7 @@ def main(args):
         y_true = y_scaler.inverse_transform(y_true).flatten()
         y_means = y_scaler.inverse_transform(y_means).flatten()
         metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        print("EDL Done")
 
 
 
@@ -178,6 +179,7 @@ def main(args):
         efficiency = np.abs(y_intervals[:, 0], y_intervals[:, 1]).mean()
         print(f"Validity: {coverage:.2f} Efficiency: {efficiency:.2f}")
         pd.DataFrame({'y_true': y_true.flatten(), 'y_pred': y_medians.flatten()}).to_csv("test.csv")
+        print("QR Done")
 
 
     elif args.ue == "MCD":
@@ -206,6 +208,7 @@ def main(args):
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var).flatten()
         metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        print("MCD Done")
 
 
 
@@ -232,7 +235,7 @@ def main(args):
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var).flatten()
         metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
-
+        print("DE Done")
 
 
     else:
@@ -263,9 +266,12 @@ if __name__ == "__main__":
     parser.add_argument("--split", type=str, help="Name of split strategy, could be 'IVIT', 'IVOT', or 'OVOT'", default='IVIT')
     parser.add_argument("--ensemble", type=int, help="Number of ensembles", default = 3)
     parser.add_argument("--fold", type=int, help="Index of CV fold", default=0)
+    parser.add_argument("--ue", type=str, help="Name of uncertainty estimation method")
     parser.add_argument("--batch_size", type=int, help="Batch size", default=100)
-    parser.add_argument("--ue", type=str, help="Name of uncertainty estimation method", default="MCD")
     parser.add_argument("--conformal", type=bool, help="Run conformal prediction or not", default=False)
     parser.add_argument("--alpha", type=float, help="Expected coverage rate", default=0.1)
-    args = parser.parse_args()
-    main(args)
+    means = ["MCD","DE","EDL","MVE","QR"]
+    for i in means:
+        parser.set_defaults(ue=i)
+        args = parser.parse_args()
+        main(args)
