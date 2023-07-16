@@ -196,7 +196,6 @@ class PICPMetric(Metric):
     """
 
     def __call__(self, preds: Tensor, targets: Tensor, **kwargs):
-        
         preds_lower = preds[:, 0]
         preds_upper = preds[:, 1]
         in_the_range = torch.sum((targets >= preds_lower) & (targets <= preds_upper))

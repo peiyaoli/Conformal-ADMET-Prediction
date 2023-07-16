@@ -8,11 +8,13 @@ import pandas as pd
 import torch
 import uncertainty_toolbox as uct
 from lightning.pytorch.callbacks import EarlyStopping
-
+from rdkit.rdBase import LogToPythonStderr
 from chempropv2 import data, featurizers
 from chempropv2.models import models, modules
-from chempropv2.utils import makedirs
+from chempropv2.utils import makedirs, find_nearest
+from chempropv2.conformal import run_icp, evaluate_icp
 
+LogToPythonStderr()
 # set precision
 torch.set_float32_matmul_precision('medium')
 # number of cross-validation folds
@@ -52,18 +54,13 @@ def reliability(y: np.ndarray,
                 p_high: np.ndarray):
     return ((p_low < y) * (y < p_high)).mean()
 
-def inverse_transform_variance(stds, X):
-        X = np.array(X).astype(float)
-        transformed_with_nan = X * (stds ** 2)
-        transformed_with_none = np.where(np.isnan(transformed_with_nan), None , transformed_with_nan)
-        return transformed_with_none
 
 def main(args):
     # set experiment name and output directory
     experiment_name = f"{OUT_DIR}/{args.dataset}-{args.split}-{args.ue}/fold_{args.fold}"
     makedirs(experiment_name)
-    dataset_path = Path(f"/root/autodl-tmp/Conformal-ADMET-Prediction/data/curated/{args.dataset}.csv")
-    split_path = Path(f"/root/autodl-tmp/Conformal-ADMET-Prediction/data/split_idxs/{args.dataset}_{args.split}.pkl")
+    dataset_path = Path(f"data/curated/{args.dataset}.csv")
+    split_path = Path(f"data/split_idxs/{args.dataset}_{args.split}.pkl")
     train_dset, val_dset, test_dset = load_molecule_datasets(dataset_path=dataset_path,
                                                              split_path=split_path,
                                                              fold_idx=args.fold)
@@ -84,8 +81,6 @@ def main(args):
     if args.ue == "BASE":
         model = models.RegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
         trainer.fit(model, train_loader, val_loader)
-
-
 
     # model 1: DMPNN with MVE loss
     elif args.ue == "MVE":
@@ -147,43 +142,82 @@ def main(args):
         metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
         print("EDL Done")
 
-
-
     # model
     elif args.ue == "QR":
         # define trainer
-        callbacks = [EarlyStopping(monitor="val/mpiw", mode="min")] #QR用的是mpiw,MVE、EDL用rmse才可以，需要修改
-        
+        callbacks = [EarlyStopping(monitor="val/loss", mode="min")] #QR用的是mpiw,MVE、EDL用rmse才可以，需要修改
         trainer = pl.Trainer(
-            # logger=False,
+            logger=False,
             enable_checkpointing=False,
             enable_progress_bar=True,
             accelerator="gpu",
             devices=1,
-            max_epochs=50,
+            max_epochs=100,
             log_every_n_steps=30,
             callbacks=callbacks
         )
-        model = models.QuantileRegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2, quantiles=torch.arange(0.01, 1, 0.01))
+        quantiles = torch.arange(0.05, 1, 0.05)
+        alpha = 0.1
+        model = models.QuantileRegressionMPNN(mpn_block=molenc, 
+                                              n_tasks=len(quantiles), 
+                                              ffn_num_layers=3,
+                                              dropout=0.2,
+                                              quantiles=quantiles)
         trainer.fit(model, train_loader, val_loader)
-        results = trainer.predict(model=model, dataloaders=test_loader)
-        y_true = test_dset.targets
-        y_medians = np.array([x[0].item() for x in results]).flatten().reshape(-1, 1)
-        y_intervals = np.array([x[1].flatten().detach().numpy() for x in results])
-        y_true = y_scaler.inverse_transform(y_true)
-        y_medians = y_scaler.inverse_transform(y_medians)
-        y_intervals = y_scaler.inverse_transform(y_intervals)
-        coverage = reliability(y_true, y_intervals[:, 0], y_intervals[:, 1])
-        efficiency = np.abs(y_intervals[:, 0], y_intervals[:, 1]).mean()
-        print(f"Validity: {coverage:.2f} Efficiency: {efficiency:.2f}")
-        pd.DataFrame({'y_true': y_true.flatten(), 'y_pred': y_medians.flatten()}).to_csv("test.csv")
-        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
-        print("QR Done")
-
-
+        # make prediction
+        test_results = trainer.predict(model=model, dataloaders=test_loader)
+        y_preds_test = np.array([x[1].detach().numpy() for x in test_results]).squeeze()
+        y_tgt_test = test_dset.targets
+        x_test = test_dset.smiles
+        
+        print("Run split-conformal QR")
+        val_results = trainer.predict(model=model, dataloaders=test_loader)
+        y_preds_val = np.array([x[1].detach().numpy() for x in val_results]).squeeze()
+        y_tgt_val = val_dset.targets
+        y_pis_test = run_icp(y_tgt_val, y_preds_val, y_preds_test, quantiles, alpha)
+        icp_metrics = evaluate_icp(y_pis_test, y_tgt_test)
+        print(icp_metrics)
+        # # save predictions of QR
+        # #prediction_results = np.array([x.detach().numpy() for x in y_preds_test])
+        # #y_medians = np.array([x[0].item() for x in predict_results]).flatten().reshape(-1, 1)
+        # y_preds = np.array([x[1].detach().numpy() for x in predict_results]).squeeze()
+        # y_preds_all = np.hstack((y_test, y_preds))
+        # y_preds_all = y_scaler.inverse_transform(y_preds_all)
+        # columns = ["Y_TRUE"] + [f"Y_PRED_Q{int(i * 100)}" for i in quantiles]
+        # y_preds_df = pd.DataFrame(data=y_preds_all, columns=columns, index=x_test)
+        # y_preds_df.to_csv("QR_predictions.csv")
+        
+        # # # run conformalized QR
+        # y_calib_true = val_dset.targets
+        # calibration_out = trainer.predict(model=model, dataloaders=val_loader)
+        # y_calib_preds = np.array([x[1].detach().numpy() for x in calibration_out]).squeeze()
+        
+        # # search for lower and upper predictions
+        # lower_idx = 0
+        # upper_idx = -1
+        # y_intervals_calib = y_preds_calib[:, [lower_idx, upper_idx]]
+        
+        # save predictions of CQR
+        
+        # evaluate CQR
+        
+        
+        
+        # y_medians = np.array([x[0].item() for x in results]).flatten().reshape(-1, 1)
+        # y_intervals = np.array([x[1].flatten().detach().numpy() for x in results])
+        # y_true = y_scaler.inverse_transform(y_true)
+        # y_medians = y_scaler.inverse_transform(y_medians)
+        # y_intervals = y_scaler.inverse_transform(y_intervals)
+        # coverage = reliability(y_true, y_intervals[:, 0], y_intervals[:, 1])
+        # efficiency = np.abs(y_intervals[:, 0], y_intervals[:, 1]).mean()
+        # print(f"Validity: {coverage:.2f} Efficiency: {efficiency:.2f}")
+        # pd.DataFrame({'y_true': y_true.flatten(), 'y_pred': y_medians.flatten()}).to_csv("test.csv")
+        # metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+                
+    
     elif args.ue == "MCD":
-        model = models.MCDropoutMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2, dropout = 0.2)
-        model.add_mc_iteration(5)
+        model = models.MCDropoutMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3, dropout = 0.5)
+        model.add_mc_iteration(20)
         callbacks = [EarlyStopping(monitor="val/rmse", mode="min")] #QR用的是mpiw,MVE、EDL用rmse才可以，需要修改
         trainer = pl.Trainer(
             # logger=False,
@@ -191,7 +225,7 @@ def main(args):
             enable_progress_bar=True,
             accelerator="gpu",
             devices=1,
-            max_epochs=50,
+            max_epochs=100,
             log_every_n_steps=30,
             callbacks=callbacks
         )
@@ -235,42 +269,23 @@ def main(args):
         predictions_std = np.sqrt(y_var).flatten()
         metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
         print("DE Done")
-
-
     else:
         raise ValueError("Wrong UE method specified!")
+    
+    
     print("Done")
-    # method = args.ue
-    # smiles = test_dset.smiles
-    # y_true = test_dset.targets
-    # if method == "MVE":
-    #     pred_mean = np.array([x[0].item() for x in results]).reshape(1, -1)
-    #     pred_var = np.array([x[1].item() for x in results]).reshape(1, -1)
-    #     pred_mean = y_scaler.inverse_transform(pred_mean)
-    #     pred_var = pred_var * y_scaler.scale_**2
-    #     pred_std = np.sqrt(pred_var)
-    #     df = pd.DataFrame(data={"SMILES": smiles, "Y_TRUE": y_true, "Y_PRED": pred_mean, "PRED_VAR": pred_var, "PRED_STD": pred_std})
-    # elif method == "EDL":
-    #     pred_mean = np.array([x[0].item() for x in results]).reshape(1, -1)
-    #     # calculate variance from EDL
-        
-    # elif method == "QR":
-    #     # approximate means with medians
-    #     pass    
-        
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Conformalized Molecular ADMET Properties Prediction")
-    parser.add_argument("--dataset", type=str, help="Name of dataset", default='Solubility_Wang2020')
+    parser.add_argument("--dataset", type=str, help="Name of dataset", default='VDss_Liu2022')
     parser.add_argument("--split", type=str, help="Name of split strategy, could be 'IVIT', 'IVOT', or 'OVOT'", default='IVIT')
-    parser.add_argument("--ensemble", type=int, help="Number of ensembles", default = 3)
     parser.add_argument("--fold", type=int, help="Index of CV fold", default=0)
     parser.add_argument("--ue", type=str, help="Name of uncertainty estimation method")
-    parser.add_argument("--batch_size", type=int, help="Batch size", default=100)
+    parser.add_argument("--batch_size", type=int, help="Batch size", default=50)
     parser.add_argument("--conformal", type=bool, help="Run conformal prediction or not", default=False)
     parser.add_argument("--alpha", type=float, help="Expected coverage rate", default=0.1)
-    means = ["MCD","DE","EDL","MVE","QR"]
-    for i in means:
+    methods = ["QR"]
+    for i in methods:
         parser.set_defaults(ue=i)
         args = parser.parse_args()
         main(args)

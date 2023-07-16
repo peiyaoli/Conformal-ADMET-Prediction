@@ -399,37 +399,37 @@ class HuberPinballLoss(LossFunction):
         return loss_data
 
 
-class ConfPinballLoss(LossFunction):
-    alias = "regression-confpinball"
+# class ConfPinballLoss(LossFunction):
+#     alias = "regression-confpinball"
 
-    def calc(self, preds, targets, **kwargs):
-        quantile_grids = kwargs["quantile_grids"].to(device=preds.device)
-        alpha = kwargs["alpha"]
-        # lamb = kwargs["lamb"]
-        # # perm = torch.randperm(preds.size(0))
-        # # rand_idx = perm[:preds]
-        # preds_cal = torch.chunk(preds, 2, dim=0)[0]
-        # preds_pred = torch.chunk(preds, 2, dim=0)[1]
-        # targets_cal = torch.chunk(targets, 2, dim=0)[0]
-        # targets_pred = torch.chunk(targets, 2, dim=0)[1]
-        # use preds_cal & targets_cal for CP NC tau calculatation
-        #tau = nonconformity_score(preds_cal, targets_cal, alpha=alpha)
-        # preds_cal_lo, preds_cal_hi = preds_cal[:, 0], preds_cal[:, -1]
-        # preds_pred_lo, preds_pred_hi = preds_pred[:, 0], preds_pred[:, -1]
-        # nc = torch.max(preds_cal_lo - targets_cal, targets_cal - preds_cal_hi)
-        # nc_rank_idx = soft_rank(nc)
-        # idx = (1 - alpha) * (1 + 1 / len(nc))
-        # tau = nc_rank_idx[nc_rank_idx.ge(idx)]
-        # preds_pred_lo -= tau
-        # preds_pred_hi += tau
-        #ineff_loss = preds_pred[:, -1] - preds_pred[:, 0] + 2 * tau
-        #errors = preds_pred - targets_pred
-        errors = preds = targets
-        Q = quantile_grids.unsqueeze(0)
-        pinball_loss = torch.max((Q - 1.0) * errors, Q * errors)
-        #loss = ineff_loss + lamb * pinball_loss.mean(dim=1)
-        loss = pinball_loss.mean(dim=1)
-        return loss.unsqueeze(1)
+#     def calc(self, preds, targets, **kwargs):
+#         quantile_grids = kwargs["quantile_grids"].to(device=preds.device)
+#         alpha = kwargs["alpha"]
+#         # lamb = kwargs["lamb"]
+#         # # perm = torch.randperm(preds.size(0))
+#         # # rand_idx = perm[:preds]
+#         # preds_cal = torch.chunk(preds, 2, dim=0)[0]
+#         # preds_pred = torch.chunk(preds, 2, dim=0)[1]
+#         # targets_cal = torch.chunk(targets, 2, dim=0)[0]
+#         # targets_pred = torch.chunk(targets, 2, dim=0)[1]
+#         # use preds_cal & targets_cal for CP NC tau calculatation
+#         #tau = nonconformity_score(preds_cal, targets_cal, alpha=alpha)
+#         # preds_cal_lo, preds_cal_hi = preds_cal[:, 0], preds_cal[:, -1]
+#         # preds_pred_lo, preds_pred_hi = preds_pred[:, 0], preds_pred[:, -1]
+#         # nc = torch.max(preds_cal_lo - targets_cal, targets_cal - preds_cal_hi)
+#         # nc_rank_idx = soft_rank(nc)
+#         # idx = (1 - alpha) * (1 + 1 / len(nc))
+#         # tau = nc_rank_idx[nc_rank_idx.ge(idx)]
+#         # preds_pred_lo -= tau
+#         # preds_pred_hi += tau
+#         #ineff_loss = preds_pred[:, -1] - preds_pred[:, 0] + 2 * tau
+#         #errors = preds_pred - targets_pred
+#         errors = preds = targets
+#         Q = quantile_grids.unsqueeze(0)
+#         pinball_loss = torch.max((Q - 1.0) * errors, Q * errors)
+#         #loss = ineff_loss + lamb * pinball_loss.mean(dim=1)
+#         loss = pinball_loss.mean(dim=1)
+#         return loss.unsqueeze(1)
 
 
 def build_loss(dataset_type: str, loss_function: str, **kwargs) -> LossFunction:
