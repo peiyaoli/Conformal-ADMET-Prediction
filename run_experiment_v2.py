@@ -40,7 +40,7 @@ def load_molecule_datasets(dataset_path, split_path, fold_idx: int = 0):
     # load split at fold-i
     split_idxs = splits[fold_idx]
     # load indexs for train/val/test sets
-    train_idx, valid_idx, test_idx = split_idxs['train'], split_idxs['val'], split_idxs['test']
+    train_idx, valid_idx, test_idx = split_idxs[0], split_idxs[1], split_idxs[2]
     # load train/val/test dataframes
     train_df, valid_df, test_df = df.iloc[train_idx], df.iloc[valid_idx], df.iloc[test_idx]
     # convert dataframes to datasets
@@ -84,8 +84,6 @@ def main(args):
     if args.ue == "BASE":
         model = models.RegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
         trainer.fit(model, train_loader, val_loader)
-
-
 
     # model 1: DMPNN with MVE loss
     elif args.ue == "MVE":
