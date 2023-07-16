@@ -88,8 +88,9 @@ class MCDropoutMPNN(RegressionMPNN):
     def predict_step(self, batch, batch_idx):
         bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
         #enable
-        self.Dropout.train()
-        pred = [self.Dropout(self((bmg, X_vd), X_f=features)).unsqueeze(0) for _ in range(self.mc_iteration)]
+        # self.Dropout.train()
+        self.ffn.train()
+        pred = [self((bmg, X_vd), X_f=features).unsqueeze(0) for _ in range(self.mc_iteration)]
         preds = torch.vstack(pred)
         pred_mean = preds.mean(dim=0)
         pred_var = preds.var(dim=0)
