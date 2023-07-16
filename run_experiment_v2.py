@@ -63,7 +63,7 @@ def main(args):
     experiment_name = f"{OUT_DIR}/{args.dataset}-{args.split}-{args.ue}/fold_{args.fold}"
     makedirs(experiment_name)
     dataset_path = Path(f"/root/autodl-tmp/Conformal-ADMET-Prediction/data/curated/{args.dataset}.csv")
-    split_path = Path(f"/root/autodl-tmp/Conformal-ADMET-Prediction/data/splitted/{args.dataset}_{args.split}.pkl")
+    split_path = Path(f"/root/autodl-tmp/Conformal-ADMET-Prediction/data/split_idxs/{args.dataset}_{args.split}.pkl")
     train_dset, val_dset, test_dset = load_molecule_datasets(dataset_path=dataset_path,
                                                              split_path=split_path,
                                                              fold_idx=args.fold)
@@ -84,6 +84,8 @@ def main(args):
     if args.ue == "BASE":
         model = models.RegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
         trainer.fit(model, train_loader, val_loader)
+
+
 
     # model 1: DMPNN with MVE loss
     elif args.ue == "MVE":
@@ -177,6 +179,7 @@ def main(args):
         efficiency = np.abs(y_intervals[:, 0], y_intervals[:, 1]).mean()
         print(f"Validity: {coverage:.2f} Efficiency: {efficiency:.2f}")
         pd.DataFrame({'y_true': y_true.flatten(), 'y_pred': y_medians.flatten()}).to_csv("test.csv")
+        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
         print("QR Done")
 
 
@@ -260,7 +263,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Conformalized Molecular ADMET Properties Prediction")
-    parser.add_argument("--dataset", type=str, help="Name of dataset", default='VDss_Liu2020')
+    parser.add_argument("--dataset", type=str, help="Name of dataset", default='Solubility_Wang2020')
     parser.add_argument("--split", type=str, help="Name of split strategy, could be 'IVIT', 'IVOT', or 'OVOT'", default='IVIT')
     parser.add_argument("--ensemble", type=int, help="Number of ensembles", default = 3)
     parser.add_argument("--fold", type=int, help="Index of CV fold", default=0)
