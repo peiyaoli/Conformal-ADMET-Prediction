@@ -2,12 +2,12 @@ import pickle
 from argparse import ArgumentParser
 from pathlib import Path
 
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import numpy as np
 import pandas as pd
 import torch
 import uncertainty_toolbox as uct
-from lightning.pytorch.callbacks import EarlyStopping
+from pytorch_lightnin.callbacks import EarlyStopping
 from rdkit.rdBase import LogToPythonStderr
 from chempropv2 import data, featurizers
 from chempropv2.models import models, modules
