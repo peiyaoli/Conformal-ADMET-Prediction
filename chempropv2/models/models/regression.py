@@ -1,10 +1,10 @@
 import torch
+import lightning.pytorch as pl
 from torch import Tensor
 from torch.nn import functional as F
 from chempropv2.data.dataloader import TrainingBatch
 from chempropv2.models.models.base import MPNN
 from chempropv2.utils import find_nearest
-from chempropv2.models.fds import FDS
 from typing import Optional
 
 class RegressionMPNN(MPNN):
@@ -58,47 +58,62 @@ class EvidentialMPNN(RegressionMPNN):
 
         return means, lambdas, alphas, betas
 
-class QuantileRegressionMPNNvFDS(MPNN):
-    _DATASET_TYPE = "regression"
-    _DEFAULT_CRITERION = "pinball"
-    _DEFAULT_METRIC = "mpiw"
-    def __init__(self, quantiles: torch.Tensor = None, n_tasks: int = None, fds: bool = True,
-                 start_smooth: int = 0, **kwargs):
-        super().__init__(n_tasks=n_tasks, **kwargs)
-        self.quantiles = quantiles
-        #self.no_crossing = no_crossing
-        self.start_smooth = start_smooth
-        self.fds = fds
-        if fds:
-            self.FDS = FDS(feature_dim=self.mpn_block.output_dim, start_smooth=self.start_smooth)
-    
-    def forward(self, inputs, X_f, targets=None) -> Tensor:
-        encoding = self.encoding(inputs=inputs, X_f=X_f)
-        encoding_s = encoding
-        
-        if self.training and self.fds:
-            if self.current_epoch >= self.start_smooth:
-                encoding_s = self.FDS.smooth(encoding_s, targets, self.current_epoch)
-        
-        Y = self.ffn[-1](encoding_s)
-        
-        if self.training and self.fds:
-            return Y, encoding
-        else:
-            return Y
-        
+
+
+class DeepEnsembleMPNN(pl.LightningModule):
+
+    _DEFAULT_CRITERION = "mse"
+
+    def __init__(self, num_models: int = 5, **kwargs):
+        super().__init__()
+        self.models = torch.nn.ModuleList([RegressionMPNN(**kwargs) for _ in range(num_models)])
+
+    def forward(self, inputs, X_f) -> Tensor:
+        return torch.stack([model.forward(inputs, X_f) for model in self.models], dim=0)
+
     def training_step(self, batch: TrainingBatch, batch_idx):
         bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
+        losses = []
 
-        mask = torch.ones((len(targets), self.n_tasks), device=targets.device)
-        targets = targets.nan_to_num(nan=0.0)
+        for model in self.models:
+            preds = model((bmg, X_vd), X_f=features)
+            loss = F.mse_loss(preds, targets)
+            losses.append(loss)
 
-        preds, feature = self(inputs=(bmg, X_vd), X_f=features, targets=targets)
-        
-        # Y = super().forward(inputs, X_f)
-        # if self.no_crossing:
-        #     Y, _ = torch.sort(Y, dim=1)
-        # return Y
+        loss = torch.stack(losses).mean()
+        self.log("train/loss", loss, prog_bar=True)
+
+        return loss
+
+    def validation_step(self, batch: TrainingBatch, batch_idx):
+        bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
+        losses = []
+
+        for model in self.models:
+            preds = model((bmg, X_vd), X_f=features)
+            loss = F.mse_loss(preds, targets)
+            losses.append(loss)
+
+        loss = torch.stack(losses).mean()
+        self.log("val/loss", loss, prog_bar=True)
+
+    def predict_step(self, batch, batch_idx):
+        bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
+        preds = []
+
+        for model in self.models:
+            pred = model((bmg, X_vd), X_f=features)
+            preds.append(pred)
+            
+        preds = torch.vstack(preds)
+        pred_mean = preds.mean(dim=0)
+        pred_var = preds.var(dim=0)
+        return pred_mean , pred_var
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        return optimizer
+
 
 
 class QuantileRegressionMPNN(MPNN):
@@ -143,8 +158,7 @@ class QuantileRegressionMPNN(MPNN):
     
     def predict_step(self, batch, batch_idx, alpha: Optional[float] = None):
         y_preds = super().predict_step(batch, batch_idx)[0]
-        q_med_idx = find_nearest(self.quantiles, 0.5)
-        y_medians = y_preds[:, q_med_idx]
+        y_medians = torch.quantile(y_preds, dim=1, q=0.5)
         if alpha is not None:
             q_lo = alpha / 2
             q_hi = 1 - q_lo
@@ -182,9 +196,9 @@ class MCDropoutMPNN(RegressionMPNN):
     def predict_step(self, batch, batch_idx):
         bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
         #enable
-        self.Dropout.train()
-        pred = [self.Dropout(self.ffn(self.fingerprint((bmg, X_vd), X_f=features))).unsqueeze(0) for _ in range(self.mc_iteration)]
-        print(pred)
+        # self.Dropout.train()
+        self.ffn.train()
+        pred = [self((bmg, X_vd), X_f=features).unsqueeze(0) for _ in range(self.mc_iteration)]
         preds = torch.vstack(pred)
         pred_mean = preds.mean(dim=0)
         pred_var = preds.var(dim=0)
