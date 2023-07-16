@@ -1,17 +1,17 @@
 import pickle
-import torch
-import pandas as pd
-import numpy as np
-import pytorch_lightning as pl
 from argparse import ArgumentParser
 from pathlib import Path
-from chempropv2 import data
-from chempropv2 import featurizers
-from chempropv2.models import modules, models
-from chempropv2.utils import makedirs
-from pytorch_lightning.callbacks import EarlyStopping
-import uncertainty_toolbox as uct
 
+import lightning.pytorch as pl
+import numpy as np
+import pandas as pd
+import torch
+import uncertainty_toolbox as uct
+from lightning.pytorch.callbacks import EarlyStopping
+
+from chempropv2 import data, featurizers
+from chempropv2.models import models, modules
+from chempropv2.utils import makedirs
 
 # set precision
 torch.set_float32_matmul_precision('medium')
@@ -137,8 +137,6 @@ def main(args):
         alphas  = np.array([x[2].item() for x in results]).flatten()
         betas   = np.array([x[3].item() for x in results]).flatten()
         var = np.array(betas) * (1 + 1 / np.array(lambdas)) / (np.array(alphas) - 1)
-        stds = np.sqrt(var)
-        # y_var = inverse_transform_variance(stds, var).astype(float)
         y_var = var*y_scaler_var
         predictions_std = np.sqrt(y_var).flatten()
         y_true = np.array(test_dset.targets).flatten().reshape(-1,1)
