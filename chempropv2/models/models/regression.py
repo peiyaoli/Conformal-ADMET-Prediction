@@ -1,5 +1,5 @@
 import torch
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 from torch import Tensor
 from torch.nn import functional as F
 from chempropv2.data.dataloader import TrainingBatch
