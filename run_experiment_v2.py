@@ -2,6 +2,7 @@ import pickle
 from argparse import ArgumentParser
 from pathlib import Path
 
+import os
 import pytorch_lightning as pl
 import numpy as np
 import pandas as pd
@@ -20,7 +21,7 @@ torch.set_float32_matmul_precision('medium')
 # number of cross-validation folds
 N_FOLDS: int = 10
 NUM_WORKERS: int = 12
-OUT_DIR: str = "./experiments"
+OUT_DIR: str = "/root/autodl-tmp/Conformal-ADMET-Prediction/experiments"
 
 def df2dset(df):
     smis = df["X"].tolist()
@@ -58,9 +59,8 @@ def reliability(y: np.ndarray,
 def main(args):
     # set experiment name and output directory
     experiment_name = f"{OUT_DIR}/{args.dataset}-{args.split}-{args.ue}/fold_{args.fold}"
-    makedirs(experiment_name)
-    dataset_path = Path(f"data/curated/{args.dataset}.csv")
-    split_path = Path(f"data/split_idxs/{args.dataset}_{args.split}.pkl")
+    dataset_path = Path(f"/root/autodl-tmp/Conformal-ADMET-Prediction/data/curated/{args.dataset}.csv")
+    split_path = Path(f"/root/autodl-tmp/Conformal-ADMET-Prediction/data/split_idxs/{args.dataset}_{args.split}.pkl")
     train_dset, val_dset, test_dset = load_molecule_datasets(dataset_path=dataset_path,
                                                              split_path=split_path,
                                                              fold_idx=args.fold)
@@ -80,7 +80,36 @@ def main(args):
     # model 0: DMPNN with MSE loss
     if args.ue == "BASE":
         model = models.RegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
+        callbacks = [EarlyStopping(monitor="val/rmse", mode="min")]
+        trainer = pl.Trainer(
+            logger=True,
+            enable_checkpointing=False,
+            enable_progress_bar=True,
+            accelerator="gpu",
+            devices=1,
+            max_epochs=50,
+            log_every_n_steps=30,
+            callbacks=callbacks
+        )
         trainer.fit(model, train_loader, val_loader)
+        predict = trainer.predict(model=model, dataloaders=test_loader)
+        first_column = [row[0] for row in predict]
+        predict = np.array(first_column).flatten().reshape(-1, 1)
+        predict = y_scaler.inverse_transform(predict).flatten()
+        y_true = np.array(test_dset.targets)
+        y_true = y_scaler.inverse_transform(y_true).flatten()
+        metrics = uct.get_all_accuracy_metrics(y_true=y_true, y_pred=predict)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict': predict})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+        metrics_index = [f'{i}' for i, value in enumerate(metrics)]
+        df = pd.DataFrame(metrics, index = metrics_index)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
+        
+
 
     # model 1: DMPNN with MVE loss
     elif args.ue == "MVE":
@@ -108,7 +137,16 @@ def main(args):
         y_true = y_scaler.inverse_transform(y_true).flatten()
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var)
-        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true, verbose=False)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict_means': y_means, 'y_predict_std':predictions_std})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+        metrics_index = [f'{i}' for i, value in enumerate(metrics)]
+        df = pd.DataFrame(metrics, index = metrics_index)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
         print("MVE Done")
         
 
@@ -139,7 +177,16 @@ def main(args):
         y_true = np.array(test_dset.targets).flatten().reshape(-1,1)
         y_true = y_scaler.inverse_transform(y_true).flatten()
         y_means = y_scaler.inverse_transform(y_means).flatten()
-        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true,verbose=False)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict_means': y_means, 'y_predict_std':predictions_std})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+        metrics_index = [f'{i}' for i, value in enumerate(metrics)]
+        df = pd.DataFrame(metrics, index = metrics_index)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
         print("EDL Done")
 
     # model
@@ -240,7 +287,16 @@ def main(args):
         y_var = y_var*y_scaler_var
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var).flatten()
-        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true,verbose=False)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict_means': y_means, 'y_predict_std':predictions_std})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+        metrics_index = [f'{i}' for i, value in enumerate(metrics)]
+        df = pd.DataFrame(metrics, index = metrics_index)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
         print("MCD Done")
 
 
@@ -267,13 +323,23 @@ def main(args):
         y_var = y_var*y_scaler_var
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var).flatten()
-        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true,verbose=False)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict_means': y_means, 'y_predict_std':predictions_std})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+        metrics_index = [f'{i}' for i, value in enumerate(metrics)]
+        df = pd.DataFrame(metrics, index = metrics_index)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
         print("DE Done")
     else:
         raise ValueError("Wrong UE method specified!")
-    
-    
+    trainer.save_checkpoint(f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}.ckpt")
     print("Done")
+
+
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Conformalized Molecular ADMET Properties Prediction")
@@ -284,8 +350,12 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, help="Batch size", default=50)
     parser.add_argument("--conformal", type=bool, help="Run conformal prediction or not", default=False)
     parser.add_argument("--alpha", type=float, help="Expected coverage rate", default=0.1)
-    methods = ["QR"]
-    for i in methods:
-        parser.set_defaults(ue=i)
-        args = parser.parse_args()
-        main(args)
+    methods = ["BASE","MCD","DE","MVE","EDL"]
+    DataSets = ["HalfLife_Liu2022","VDss_Liu2022","Solubility_Wang2020","RLM_Fang2023","Permeability_MDCK_Fang2023","Permeability_Caco2_Wang2020","Lipophilicity_Wang2020","LD50_Lunghini2019","hPPB_Lou2022","HLM_Fang2023"]
+    SPlit = ['IVIT', 'IVOT', 'OVOT']
+    for k in SPlit:
+        for j in DataSets:
+            for i in methods:
+                parser.set_defaults(ue=i, dataset=j, split =k)
+                args = parser.parse_args()
+                main(args)
