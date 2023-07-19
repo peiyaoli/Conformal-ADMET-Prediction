@@ -2,11 +2,14 @@ import pickle
 from argparse import ArgumentParser
 from pathlib import Path
 import lightning.pytorch as pl
+
+import os
+import pytorch_lightning as pl
 import numpy as np
 import pandas as pd
 import torch
 import uncertainty_toolbox as uct
-from lightning.pytorch.callbacks import EarlyStopping
+from pytorch_lightning.callbacks import EarlyStopping
 from rdkit.rdBase import LogToPythonStderr
 from chempropv2 import data, featurizers
 from chempropv2.models import models, modules
@@ -80,12 +83,7 @@ def main(args):
     # vallina MSE MPNN
     # model 0: DMPNN with MSE loss
     if args.ue == "BASE":
-        model = models.RegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
-        trainer.fit(model, train_loader, val_loader)
-
-    # model 1: DMPNN with MVE loss
-    elif args.ue == "MVE":
-        model = models.MveRegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
+        model = models.RegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3)
         callbacks = [EarlyStopping(monitor="val/rmse", mode="min")]
         trainer = pl.Trainer(
             logger=True,
@@ -93,7 +91,40 @@ def main(args):
             enable_progress_bar=True,
             accelerator="gpu",
             devices=1,
-            max_epochs=50,
+            max_epochs=100,
+            log_every_n_steps=30,
+            callbacks=callbacks
+        )
+        trainer.fit(model, train_loader, val_loader)
+        predict = trainer.predict(model=model, dataloaders=test_loader)
+        first_column = [row[0] for row in predict]
+        predict = np.array(first_column).flatten().reshape(-1, 1)
+        predict = y_scaler.inverse_transform(predict).flatten()
+        y_true = np.array(test_dset.targets)
+        y_true = y_scaler.inverse_transform(y_true).flatten()
+        metrics = uct.get_all_accuracy_metrics(y_true=y_true, y_pred=predict)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict': predict})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+        df = pd.DataFrame([metrics])
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
+        
+
+
+    # model 1: DMPNN with MVE loss
+    elif args.ue == "MVE":
+        model = models.MveRegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3)
+        callbacks = [EarlyStopping(monitor="val/rmse", mode="min")]
+        trainer = pl.Trainer(
+            logger=True,
+            enable_checkpointing=False,
+            enable_progress_bar=True,
+            accelerator="gpu",
+            devices=1,
+            max_epochs=100,
             log_every_n_steps=30,
             callbacks=callbacks
         )
@@ -109,14 +140,50 @@ def main(args):
         y_true = y_scaler.inverse_transform(y_true).flatten()
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var)
-        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true, verbose=False)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict_means': y_means, 'y_predict_std':predictions_std})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+
+
+        metrics_values = dict()
+        for outer_key, inner_dict in metrics.items():
+            for inner_key, value in inner_dict.items():
+                metrics_values[inner_key]=value
+        
+        ma_adv_group_cal = metrics_values['ma_adv_group_cal']
+        rms_adv_group_cal = metrics_values['rms_adv_group_cal']
+        del metrics_values['ma_adv_group_cal']
+        del metrics_values['rms_adv_group_cal']
+        group_sizes = ma_adv_group_cal['group_sizes']
+        ma_adv_group_cali_mean = ma_adv_group_cal['adv_group_cali_mean']
+        ma_adv_group_cali_stderr = ma_adv_group_cal['adv_group_cali_stderr']
+        rms_adv_group_cali_mean   = rms_adv_group_cal['adv_group_cali_mean']
+        rms_adv_group_cali_stderr = rms_adv_group_cal['adv_group_cali_stderr']
+
+        for i in range(len(group_sizes)):
+            metrics_values[f'ma_adv_group_cali_mean_group{group_sizes[i]}'] = ma_adv_group_cali_mean[i]    
+        for i in range(len(group_sizes)):
+            metrics_values[f'ma_adv_group_cali_stderr_group{group_sizes[i]}'] = ma_adv_group_cali_stderr[i]
+        for i in range(len(group_sizes)):
+            metrics_values[f'rms_adv_group_cali_mean_group{group_sizes[i]}'] = rms_adv_group_cali_mean[i]
+        for i in range(len(group_sizes)):
+            metrics_values[f'rms_adv_group_cali_stderr_group{group_sizes[i]}'] = rms_adv_group_cali_stderr[i]        
+
+        df = pd.DataFrame([metrics_values])
+
+
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
         print("MVE Done")
         
 
 
     # model 2: DMPNN with evidential loss
     elif args.ue == "EDL":
-        model = models.EvidentialMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
+        model = models.EvidentialMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3)
         callbacks = [EarlyStopping(monitor="val/rmse", mode="min")]
         trainer = pl.Trainer(
             logger=True,
@@ -124,7 +191,7 @@ def main(args):
             enable_progress_bar=True,
             accelerator="gpu",
             devices=1,
-            max_epochs=50,
+            max_epochs=100,
             log_every_n_steps=30,
             callbacks=callbacks
         )
@@ -140,7 +207,43 @@ def main(args):
         y_true = np.array(test_dset.targets).flatten().reshape(-1,1)
         y_true = y_scaler.inverse_transform(y_true).flatten()
         y_means = y_scaler.inverse_transform(y_means).flatten()
-        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true,verbose=False)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict_means': y_means, 'y_predict_std':predictions_std})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+
+
+        metrics_values = dict()
+        for outer_key, inner_dict in metrics.items():
+            for inner_key, value in inner_dict.items():
+                metrics_values[inner_key]=value
+        
+        ma_adv_group_cal = metrics_values['ma_adv_group_cal']
+        rms_adv_group_cal = metrics_values['rms_adv_group_cal']
+        del metrics_values['ma_adv_group_cal']
+        del metrics_values['rms_adv_group_cal']
+        group_sizes = ma_adv_group_cal['group_sizes']
+        ma_adv_group_cali_mean = ma_adv_group_cal['adv_group_cali_mean']
+        ma_adv_group_cali_stderr = ma_adv_group_cal['adv_group_cali_stderr']
+        rms_adv_group_cali_mean   = rms_adv_group_cal['adv_group_cali_mean']
+        rms_adv_group_cali_stderr = rms_adv_group_cal['adv_group_cali_stderr']
+
+        for i in range(len(group_sizes)):
+            metrics_values[f'ma_adv_group_cali_mean_group{group_sizes[i]}'] = ma_adv_group_cali_mean[i]    
+        for i in range(len(group_sizes)):
+            metrics_values[f'ma_adv_group_cali_stderr_group{group_sizes[i]}'] = ma_adv_group_cali_stderr[i]
+        for i in range(len(group_sizes)):
+            metrics_values[f'rms_adv_group_cali_mean_group{group_sizes[i]}'] = rms_adv_group_cali_mean[i]
+        for i in range(len(group_sizes)):
+            metrics_values[f'rms_adv_group_cali_stderr_group{group_sizes[i]}'] = rms_adv_group_cali_stderr[i]        
+
+        df = pd.DataFrame([metrics_values])
+
+
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
         print("EDL Done")
 
     # model
@@ -270,13 +373,47 @@ def main(args):
         y_var = y_var*y_scaler_var
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var).flatten()
-        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true,verbose=False)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict_means': y_means, 'y_predict_std':predictions_std})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+
+
+        metrics_values = dict()
+        for outer_key, inner_dict in metrics.items():
+            for inner_key, value in inner_dict.items():
+                metrics_values[inner_key]=value
+        
+        ma_adv_group_cal = metrics_values['ma_adv_group_cal']
+        rms_adv_group_cal = metrics_values['rms_adv_group_cal']
+        del metrics_values['ma_adv_group_cal']
+        del metrics_values['rms_adv_group_cal']
+        group_sizes = ma_adv_group_cal['group_sizes']
+        ma_adv_group_cali_mean = ma_adv_group_cal['adv_group_cali_mean']
+        ma_adv_group_cali_stderr = ma_adv_group_cal['adv_group_cali_stderr']
+        rms_adv_group_cali_mean   = rms_adv_group_cal['adv_group_cali_mean']
+        rms_adv_group_cali_stderr = rms_adv_group_cal['adv_group_cali_stderr']
+
+        for i in range(len(group_sizes)):
+            metrics_values[f'ma_adv_group_cali_mean_group{group_sizes[i]}'] = ma_adv_group_cali_mean[i]    
+        for i in range(len(group_sizes)):
+            metrics_values[f'ma_adv_group_cali_stderr_group{group_sizes[i]}'] = ma_adv_group_cali_stderr[i]
+        for i in range(len(group_sizes)):
+            metrics_values[f'rms_adv_group_cali_mean_group{group_sizes[i]}'] = rms_adv_group_cali_mean[i]
+        for i in range(len(group_sizes)):
+            metrics_values[f'rms_adv_group_cali_stderr_group{group_sizes[i]}'] = rms_adv_group_cali_stderr[i]        
+
+        df = pd.DataFrame([metrics_values])
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
         print("MCD Done")
 
 
 
     elif args.ue == "DE":
-        model = models.DeepEnsembleMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2,num_models=5)
+        model = models.DeepEnsembleMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3,num_models=5)
         callbacks = [EarlyStopping(monitor="val/loss", mode="min")] 
         trainer = pl.Trainer(
             # logger=False,
@@ -284,7 +421,7 @@ def main(args):
             enable_progress_bar=True,
             accelerator="gpu",
             devices=1,
-            max_epochs=50,
+            max_epochs=100,
             log_every_n_steps=30,
             callbacks=callbacks
         )
@@ -297,13 +434,50 @@ def main(args):
         y_var = y_var*y_scaler_var
         y_means = y_scaler.inverse_transform(y_means).flatten()
         predictions_std = np.sqrt(y_var).flatten()
-        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true,verbose=False)
+        df = pd.DataFrame({'y_true': y_true, 'y_predict_means': y_means, 'y_predict_std':predictions_std})
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}"
+        os.makedirs(save_path, exist_ok=True)
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
+        df.to_csv(save_path, index=False)
+
+        
+        metrics_values = dict()
+        for outer_key, inner_dict in metrics.items():
+            for inner_key, value in inner_dict.items():
+                metrics_values[inner_key]=value
+        
+        ma_adv_group_cal = metrics_values['ma_adv_group_cal']
+        rms_adv_group_cal = metrics_values['rms_adv_group_cal']
+        del metrics_values['ma_adv_group_cal']
+        del metrics_values['rms_adv_group_cal']
+        group_sizes = ma_adv_group_cal['group_sizes']
+        ma_adv_group_cali_mean = ma_adv_group_cal['adv_group_cali_mean']
+        ma_adv_group_cali_stderr = ma_adv_group_cal['adv_group_cali_stderr']
+        rms_adv_group_cali_mean   = rms_adv_group_cal['adv_group_cali_mean']
+        rms_adv_group_cali_stderr = rms_adv_group_cal['adv_group_cali_stderr']
+
+        for i in range(len(group_sizes)):
+            metrics_values[f'ma_adv_group_cali_mean_group{group_sizes[i]}'] = ma_adv_group_cali_mean[i]    
+        for i in range(len(group_sizes)):
+            metrics_values[f'ma_adv_group_cali_stderr_group{group_sizes[i]}'] = ma_adv_group_cali_stderr[i]
+        for i in range(len(group_sizes)):
+            metrics_values[f'rms_adv_group_cali_mean_group{group_sizes[i]}'] = rms_adv_group_cali_mean[i]
+        for i in range(len(group_sizes)):
+            metrics_values[f'rms_adv_group_cali_stderr_group{group_sizes[i]}'] = rms_adv_group_cali_stderr[i]        
+
+        df = pd.DataFrame([metrics_values])
+
+
+        save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
+        df.to_csv(save_path)
         print("DE Done")
     else:
         raise ValueError("Wrong UE method specified!")
-    
-    
+    trainer.save_checkpoint(f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}.ckpt")
     print("Done")
+
+
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Conformalized Molecular ADMET Properties Prediction")
@@ -314,8 +488,12 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, help="Batch size", default=50)
     parser.add_argument("--conformal", type=bool, help="Run conformal prediction or not", default=False)
     parser.add_argument("--alpha", type=float, help="Expected coverage rate", default=0.1)
-    methods = ["QR"]
-    for i in methods:
-        parser.set_defaults(ue=i)
-        args = parser.parse_args()
-        main(args)
+    methods = ["BASE", "MCD","DE","MVE","EDL"]
+    DataSets = ["HalfLife_Liu2022","VDss_Liu2022","Solubility_Wang2020","RLM_Fang2023","Permeability_MDCK_Fang2023","Permeability_Caco2_Wang2020","Lipophilicity_Wang2020","LD50_Lunghini2019","hPPB_Lou2022","HLM_Fang2023"]
+    SPlit = ['IVIT', 'IVOT', 'OVOT']
+    for k in SPlit:
+        for j in DataSets:
+            for i in methods:
+                parser.set_defaults(ue=i, dataset=j, split =k)
+                args = parser.parse_args()
+                main(args)
