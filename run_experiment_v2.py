@@ -79,7 +79,7 @@ def main(args):
     # vallina MSE MPNN
     # model 0: DMPNN with MSE loss
     if args.ue == "BASE":
-        model = models.RegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
+        model = models.RegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3)
         callbacks = [EarlyStopping(monitor="val/rmse", mode="min")]
         trainer = pl.Trainer(
             logger=True,
@@ -113,7 +113,7 @@ def main(args):
 
     # model 1: DMPNN with MVE loss
     elif args.ue == "MVE":
-        model = models.MveRegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
+        model = models.MveRegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3)
         callbacks = [EarlyStopping(monitor="val/rmse", mode="min")]
         trainer = pl.Trainer(
             logger=True,
@@ -143,8 +143,11 @@ def main(args):
         os.makedirs(save_path, exist_ok=True)
         save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
         df.to_csv(save_path, index=False)
-        metrics_index = [f'{i}' for i, value in enumerate(metrics)]
-        df = pd.DataFrame(metrics, index = metrics_index)
+        metrics_values = dict()
+        for outer_key, inner_dict in metrics.items():
+            for inner_key, value in inner_dict.items():
+                metrics_values[inner_key]=value        
+        df = pd.DataFrame(metrics_values)
         save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
         df.to_csv(save_path)
         print("MVE Done")
@@ -153,7 +156,7 @@ def main(args):
 
     # model 2: DMPNN with evidential loss
     elif args.ue == "EDL":
-        model = models.EvidentialMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2)
+        model = models.EvidentialMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3)
         callbacks = [EarlyStopping(monitor="val/rmse", mode="min")]
         trainer = pl.Trainer(
             logger=True,
@@ -183,8 +186,11 @@ def main(args):
         os.makedirs(save_path, exist_ok=True)
         save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
         df.to_csv(save_path, index=False)
-        metrics_index = [f'{i}' for i, value in enumerate(metrics)]
-        df = pd.DataFrame(metrics, index = metrics_index)
+        metrics_values = dict()
+        for outer_key, inner_dict in metrics.items():
+            for inner_key, value in inner_dict.items():
+                metrics_values[inner_key]=value        
+        df = pd.DataFrame(metrics_values)
         save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
         df.to_csv(save_path)
         print("EDL Done")
@@ -293,8 +299,11 @@ def main(args):
         os.makedirs(save_path, exist_ok=True)
         save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
         df.to_csv(save_path, index=False)
-        metrics_index = [f'{i}' for i, value in enumerate(metrics)]
-        df = pd.DataFrame(metrics, index = metrics_index)
+        metrics_values = dict()
+        for outer_key, inner_dict in metrics.items():
+            for inner_key, value in inner_dict.items():
+                metrics_values[inner_key]=value
+        df = pd.DataFrame(metrics_values)
         save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
         df.to_csv(save_path)
         print("MCD Done")
@@ -302,7 +311,7 @@ def main(args):
 
 
     elif args.ue == "DE":
-        model = models.DeepEnsembleMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=2,num_models=5)
+        model = models.DeepEnsembleMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3,num_models=5)
         callbacks = [EarlyStopping(monitor="val/loss", mode="min")] 
         trainer = pl.Trainer(
             # logger=False,
@@ -329,8 +338,11 @@ def main(args):
         os.makedirs(save_path, exist_ok=True)
         save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_PREDICTIONS.csv" 
         df.to_csv(save_path, index=False)
-        metrics_index = [f'{i}' for i, value in enumerate(metrics)]
-        df = pd.DataFrame(metrics, index = metrics_index)
+        metrics_values = dict()
+        for outer_key, inner_dict in metrics.items():
+            for inner_key, value in inner_dict.items():
+                metrics_values[inner_key]=value
+        df = pd.DataFrame(metrics_values)
         save_path = f"{OUT_DIR}/{args.dataset}/{args.split}/{args.ue}/{args.fold}/{args.dataset}_{args.split}_{args.ue}_fold_{args.fold}_METRICS.csv"
         df.to_csv(save_path)
         print("DE Done")
@@ -350,7 +362,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, help="Batch size", default=50)
     parser.add_argument("--conformal", type=bool, help="Run conformal prediction or not", default=False)
     parser.add_argument("--alpha", type=float, help="Expected coverage rate", default=0.1)
-    methods = ["BASE","MCD","DE","MVE","EDL"]
+    methods = ['BASE',"MCD","DE","MVE","EDL"]
     DataSets = ["HalfLife_Liu2022","VDss_Liu2022","Solubility_Wang2020","RLM_Fang2023","Permeability_MDCK_Fang2023","Permeability_Caco2_Wang2020","Lipophilicity_Wang2020","LD50_Lunghini2019","hPPB_Lou2022","HLM_Fang2023"]
     SPlit = ['IVIT', 'IVOT', 'OVOT']
     for k in SPlit:
