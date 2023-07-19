@@ -156,16 +156,12 @@ class QuantileRegressionMPNN(MPNN):
         )
         self.log_dict({"val/loss": val_loss}, on_epoch=True, batch_size=len(targets), prog_bar=True)
     
-    def predict_step(self, batch, batch_idx, alpha: Optional[float] = None):
+    def predict_step(self, batch, batch_idx):
+        bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
+        y_latent = super().encoding((bmg, X_vd), X_f=features)
         y_preds = super().predict_step(batch, batch_idx)[0]
         y_medians = torch.quantile(y_preds, dim=1, q=0.5)
-        if alpha is not None:
-            q_lo = alpha / 2
-            q_hi = 1 - q_lo
-            q_lo_idx = find_nearest(self.quantiles, q_lo)
-            q_hi_idx = find_nearest(self.quantiles, q_hi)
-            y_preds = y_preds[:, [q_lo_idx, q_hi_idx]]
-        return y_medians, y_preds
+        return y_medians, y_preds, y_latent
     
     
 class MCDropoutMPNN(RegressionMPNN):

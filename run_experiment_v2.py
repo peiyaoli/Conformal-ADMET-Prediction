@@ -1,7 +1,6 @@
 import pickle
 from argparse import ArgumentParser
 from pathlib import Path
-
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
@@ -13,6 +12,7 @@ from chempropv2 import data, featurizers
 from chempropv2.models import models, modules
 from chempropv2.utils import makedirs, find_nearest
 from chempropv2.conformal import run_icp, evaluate_icp
+from denmarf import DensityEstimate
 
 LogToPythonStderr()
 # set precision
@@ -20,7 +20,7 @@ torch.set_float32_matmul_precision('medium')
 # number of cross-validation folds
 N_FOLDS: int = 10
 NUM_WORKERS: int = 12
-OUT_DIR: str = "./experiments"
+OUT_DIR: str = Path("./experiments")
 
 def df2dset(df):
     smis = df["X"].tolist()
@@ -57,8 +57,9 @@ def reliability(y: np.ndarray,
 
 def main(args):
     # set experiment name and output directory
-    experiment_name = f"{OUT_DIR}/{args.dataset}-{args.split}-{args.ue}/fold_{args.fold}"
-    makedirs(experiment_name)
+    experiment_name = f"{args.dataset}-{args.split}-{args.ue}-fold_{args.fold}"
+    experiment_folder = OUT_DIR / experiment_name.replace("-", "/")
+    makedirs(experiment_folder)
     dataset_path = Path(f"data/curated/{args.dataset}.csv")
     split_path = Path(f"data/split_idxs/{args.dataset}_{args.split}.pkl")
     train_dset, val_dset, test_dset = load_molecule_datasets(dataset_path=dataset_path,
@@ -157,26 +158,55 @@ def main(args):
             callbacks=callbacks
         )
         quantiles = torch.arange(0.05, 1, 0.05)
-        alpha = 0.1
         model = models.QuantileRegressionMPNN(mpn_block=molenc, 
                                               n_tasks=len(quantiles), 
-                                              ffn_num_layers=3,
-                                              dropout=0.2,
+                                              ffn_num_layers=2,
+                                              #dropout=0.2,
                                               quantiles=quantiles)
         trainer.fit(model, train_loader, val_loader)
-        # make prediction
-        test_results = trainer.predict(model=model, dataloaders=test_loader)
-        y_preds_test = np.array([x[1].detach().numpy() for x in test_results]).squeeze()
-        y_tgt_test = test_dset.targets
-        x_test = test_dset.smiles
+        val_preds = trainer.predict(model=model, dataloaders=val_loader)
+        test_preds = trainer.predict(model=model, dataloaders=test_loader)
+        
+        # extract all results from validation data loader
+        y_preds_medians_val = np.array([x[0].detach().numpy() for x in val_preds]).squeeze()
+        y_preds_quantiles_val = np.array([x[1].detach().numpy() for x in val_preds]).squeeze()
+        y_latns_val = np.array([x[2].detach().numpy() for x in val_preds]).squeeze()
+        
+        y_preds_medians_test = np.array([x[0].detach().numpy() for x in test_preds]).squeeze()
+        y_preds_quantiles_test = np.array([x[1].detach().numpy() for x in test_preds]).squeeze()
+        y_latns_test = np.array([x[2].detach().numpy() for x in test_preds]).squeeze()
+        
+        tmp_vars = {
+            "quantiles": quantiles.detach().numpy(),
+            "y_preds_val": y_preds_quantiles_val,
+            "y_latns_val": y_latns_val,
+            "y_true_val": val_dset.targets,
+            "y_preds_test": y_preds_quantiles_test,
+            "y_latns_test": y_latns_test,
+            "y_true_test": test_dset.targets,
+        }
+        with open(experiment_folder / 'CQR_tmp.pkl', 'wb') as handle:
+            pickle.dump(tmp_vars, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        
+        # val_de = DensityEstimate(device='cuda', use_cuda=True, bounded=True)
+        # val_de.fit(x_latents_val, p_train=0.8, num_hidden=64, num_epochs=100, lower_bounds=0, upper_bounds=1)
+        # scores_val = val_de.score_samples(x_latents_val)
+        # scores_test = val_de.score_samples(x_latents_test)
+        # density = pd.DataFrame(data={'val': scores_val, 'test': scores_test})
+        # density.to_csv("density_estimation.csv")
+        # # make prediction
+        # test_results = trainer.predict(model=model, dataloaders=test_loader)
+        # y_preds_test = np.array([x[1].detach().numpy() for x in test_results]).squeeze()
+        # y_tgt_test = test_dset.targets
+        # x_test = test_dset.smiles
         
         print("Run split-conformal QR")
-        val_results = trainer.predict(model=model, dataloaders=test_loader)
-        y_preds_val = np.array([x[1].detach().numpy() for x in val_results]).squeeze()
-        y_tgt_val = val_dset.targets
-        y_pis_test = run_icp(y_tgt_val, y_preds_val, y_preds_test, quantiles, alpha)
-        icp_metrics = evaluate_icp(y_pis_test, y_tgt_test)
-        print(icp_metrics)
+        # val_results = trainer.predict(model=model, dataloaders=test_loader)
+        # y_preds_val = np.array([x[1].detach().numpy() for x in val_results]).squeeze()
+        # y_tgt_val = val_dset.targets
+        # y_pis_test = run_icp(y_tgt_val, y_preds_val, y_preds_test, quantiles, alpha)
+        # icp_metrics = evaluate_icp(y_pis_test, y_tgt_test)
+        # print(icp_metrics)
         # # save predictions of QR
         # #prediction_results = np.array([x.detach().numpy() for x in y_preds_test])
         # #y_medians = np.array([x[0].item() for x in predict_results]).flatten().reshape(-1, 1)
