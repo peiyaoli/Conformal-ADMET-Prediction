@@ -14,7 +14,7 @@ from chempropv2 import data, featurizers
 from chempropv2.models import models, modules
 from chempropv2.utils import makedirs, find_nearest
 from chempropv2.conformal import run_icp, evaluate_icp
-from denmarf import DensityEstimate
+from chempropv2.utils import estimate_sample_weights
 
 LogToPythonStderr()
 # set precision
@@ -22,13 +22,16 @@ torch.set_float32_matmul_precision('medium')
 # number of cross-validation folds
 N_FOLDS: int = 10
 NUM_WORKERS: int = 12
-OUT_DIR: str = Path("./experiments")
+OUT_DIR: str = Path("experiments")
 
-def df2dset(df):
+def df2dset(df, **kwargs):
     smis = df["X"].tolist()
-    scores = df["Y"].tolist()
-    scores = np.array(scores).reshape(-1, 1)
-    datapoints = [data.MoleculeDatapoint(smi, target) for smi, target in zip(smis, scores)]
+    targets = df["Y"].tolist()
+    targets = np.array(targets).reshape(-1, 1)
+    if "data_weight" in kwargs:
+        datapoints = [data.MoleculeDatapoint(smi=smi, targets=target, data_weight=data_weight) for smi, target, data_weight in zip(smis, targets, kwargs["data_weight"])]
+    else:
+        datapoints = [data.MoleculeDatapoint(smi=smi, targets=target) for smi, target in zip(smis, targets)]
     # set molecule featurizer
     featurizer = featurizers.MoleculeFeaturizer()
     dset = data.MoleculeDataset(datapoints, featurizer)        
@@ -47,15 +50,17 @@ def load_molecule_datasets(dataset_path, split_path, fold_idx: int = 0):
     train_idx, valid_idx, test_idx = split_idxs[0], split_idxs[1], split_idxs[2]
     # load train/val/test dataframes
     train_df, valid_df, test_df = df.iloc[train_idx], df.iloc[valid_idx], df.iloc[test_idx]
+    # sample size of train set
+    n_train = len(train_df)
+    # extract targets' values from train & val for sample weights estimation
+    targets_train_val = np.concatenate((train_df["Y"].values, valid_df["Y"].values))
+    w = estimate_sample_weights(targets=targets_train_val)
+    w_train = w[:n_train]
+    w_val = w[n_train:]
     # convert dataframes to datasets
-    train_dset, val_dset, test_dset = df2dset(train_df), df2dset(valid_df), df2dset(test_df)
+    train_dset, val_dset, test_dset = df2dset(train_df, data_weight=w_train), df2dset(valid_df, data_weight=w_val), df2dset(test_df)
     return (train_dset, val_dset, test_dset)
-
-def reliability(y: np.ndarray,
-                p_low: np.ndarray,
-                p_high: np.ndarray):
-    return ((p_low < y) * (y < p_high)).mean()
-
+    
 
 def main(args):
     # set experiment name and output directory
@@ -69,7 +74,8 @@ def main(args):
                                                              fold_idx=args.fold)
     # normalize target values
     y_scaler = train_dset.normalize_targets()
-    #w_t = train_dset.prepare_target_weights(reweight="sqrt_inv", lds=True)
+    print(f"Normalize targets with {y_scaler.mean_} (+/- {np.sqrt(y_scaler.var_)})")
+    print(y_scaler.mean_)
     y_scaler_var = y_scaler.var_
     val_dset.normalize_targets(y_scaler)
     test_dset.normalize_targets(y_scaler)
@@ -83,7 +89,10 @@ def main(args):
     # vallina MSE MPNN
     # model 0: DMPNN with MSE loss
     if args.ue == "BASE":
-        model = models.RegressionMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3)
+        model = models.RegressionMPNN(mpn_block=molenc, 
+                                      n_tasks=1, 
+                                      ffn_num_layers=3,
+                                      dropout=0.2)
         callbacks = [EarlyStopping(monitor="val/rmse", mode="min")]
         trainer = pl.Trainer(
             logger=True,
@@ -247,11 +256,16 @@ def main(args):
         print("EDL Done")
 
     # model
-    elif args.ue == "QR":
+    elif args.ue == "JQR":
+        callbacks = [EarlyStopping(monitor="val/loss", mode="min", patience=10)]
+        
+        
+        pass
+    
+    elif args.ue == "JMQR":
         # define trainer
-        callbacks = [EarlyStopping(monitor="val/loss", mode="min", patience=10)] #QR用的是mpiw,MVE、EDL用rmse才可以，需要修改
+        callbacks = [EarlyStopping(monitor="val/loss", mode="min", patience=10)]
         trainer = pl.Trainer(
-            logger=False,
             enable_checkpointing=False,
             enable_progress_bar=True,
             accelerator="gpu",
@@ -261,103 +275,39 @@ def main(args):
             callbacks=callbacks
         )
         quantiles = torch.arange(0.05, 1, 0.05)
-        q_low_idx = find_nearest(quantiles, 0.05)
-        q_high_idx = find_nearest(quantiles, 0.95)
         model = models.JointMeanQuantileRegressionMPNN(mpn_block=molenc, 
-                                              n_tasks=len(quantiles) + 1, 
-                                              ffn_num_layers=3,
-                                              dropout=0.2,
-                                              quantiles=quantiles)
+                                                       n_tasks=len(quantiles) + 1, 
+                                                       ffn_num_layers=3,
+                                                       dropout=0.2,
+                                                       quantiles=quantiles)
         trainer.fit(model, train_loader, val_loader)
-        #val_preds = trainer.predict(model=model, dataloaders=val_loader)
-        test_results = trainer.predict(model=model, dataloaders=test_loader)
+        # inference on validation set
+        val_preds = trainer.predict(model=model, dataloaders=val_loader)
+        y_true_val = val_dset.targets
+        y_preds_mean_val = np.array([x[0].detach().numpy() for x in val_preds]).squeeze(-1)
+        y_preds_quantiles_val = np.array([x[1].detach().numpy() for x in val_preds]).squeeze()
+        columns = ["Y_TRUE", "Y_PRED_MEAN"] + [f"Y_PRED_Q{int(i * 100)}" for i in quantiles]
+        y_preds_valset = np.hstack((y_true_val, y_preds_mean_val, y_preds_quantiles_val))
+        y_preds_valset = pd.DataFrame(data=y_preds_valset, columns=columns, index=val_dset.smiles)
+        y_preds_valset.to_csv("JMQR_predictions_IVIT_fold0_valset.csv")
+        # reverse
+        y_preds_valset_inv = y_scaler.inverse_transform(y_preds_valset)
+        y_preds_valset_inv_df = pd.DataFrame(data=y_preds_valset_inv, columns=columns, index=val_dset.smiles)
+        y_preds_valset_inv_df.to_csv("JMQR_predictions_IVIT_fold0_valset_inv.csv")
         
-        # # extract all results from validation data loader
+        # inference on testset
+        test_results = trainer.predict(model=model, dataloaders=test_loader)
         y_true_test = test_dset.targets
         y_preds_mean_test = np.array([x[0].detach().numpy() for x in test_results]).squeeze(-1)
         y_preds_quantiles_test = np.array([x[1].detach().numpy() for x in test_results]).squeeze()
-        y_pis = y_preds_quantiles_test[:, [q_low_idx, q_high_idx]]
-        
-        coverage = reliability(y_true_test, y_pis[:, 0], y_pis[:, 1])
-        efficiency = np.abs(y_pis[:, 0], y_pis[:, 1]).mean()
-        print(f"Validity: {coverage:.2f} Efficiency: {efficiency:.2f}")
+
         columns = ["Y_TRUE", "Y_PRED_MEAN"] + [f"Y_PRED_Q{int(i * 100)}" for i in quantiles]
-        y_preds_all = np.hstack((y_true_test, y_preds_mean_test, y_preds_quantiles_test))
-        y_preds_df = pd.DataFrame(data=y_preds_all, columns=columns, index=test_dset.smiles)
-        y_preds_df.to_csv("JQR_predictions.csv")
-        
-        #pd.DataFrame({'y_true': y_true_test.flatten(), 'y_pred_mean': y_medians.flatten()}).to_csv("test.csv")
-        # y_latns_val = np.array([x[2].detach().numpy() for x in val_preds]).squeeze()
-        
-        # y_preds_medians_test = np.array([x[0].detach().numpy() for x in test_preds]).squeeze()
-        # y_preds_quantiles_test = np.array([x[1].detach().numpy() for x in test_preds]).squeeze()
-        # y_latns_test = np.array([x[2].detach().numpy() for x in test_preds]).squeeze()
-        
-        # tmp_vars = {
-        #     "quantiles": quantiles.detach().numpy(),
-        #     "y_preds_val": y_preds_quantiles_val,
-        #     "y_latns_val": y_latns_val,
-        #     "y_true_val": val_dset.targets,
-        #     "y_preds_test": y_preds_quantiles_test,
-        #     "y_latns_test": y_latns_test,
-        #     "y_true_test": test_dset.targets,
-        # }
-        # with open(experiment_folder / 'CQR_tmp.pkl', 'wb') as handle:
-        #     pickle.dump(tmp_vars, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        
-        # val_de = DensityEstimate(device='cuda', use_cuda=True, bounded=True)
-        # val_de.fit(x_latents_val, p_train=0.8, num_hidden=64, num_epochs=100, lower_bounds=0, upper_bounds=1)
-        # scores_val = val_de.score_samples(x_latents_val)
-        # scores_test = val_de.score_samples(x_latents_test)
-        # density = pd.DataFrame(data={'val': scores_val, 'test': scores_test})
-        # density.to_csv("density_estimation.csv")
-        # # make prediction
-        # test_results = trainer.predict(model=model, dataloaders=test_loader)
-        # y_preds_test = np.array([x[1].detach().numpy() for x in test_results]).squeeze()
-        # y_tgt_test = test_dset.targets
-        # x_test = test_dset.smiles
-        
-        print("Run split-conformal QR")
-        val_results = trainer.predict(model=model, dataloaders=test_loader)
-        y_preds_quantiles_val = np.array([x[1].detach().numpy() for x in val_results]).squeeze()
-        y_tgt_val = val_dset.targets
-        y_pis_test = run_icp(y_tgt_val, y_preds_quantiles_val, y_preds_quantiles_test, quantiles, alpha=0.1)
-        icp_metrics = evaluate_icp(y_pis_test, y_true_test)
-        print(icp_metrics)
-        # # save predictions of QR
-        # #prediction_results = np.array([x.detach().numpy() for x in y_preds_test])
-        # #y_medians = np.array([x[0].item() for x in predict_results]).flatten().reshape(-1, 1)
-        # y_preds = np.array([x[1].detach().numpy() for x in predict_results]).squeeze()
-        # y_preds_all = np.hstack((y_test, y_preds))
-        # y_preds_all = y_scaler.inverse_transform(y_preds_all)
-        
-        # y_preds_df = pd.DataFrame(data=y_preds_all, columns=columns, index=x_test)
-        # y_preds_df.to_csv("QR_predictions.csv")
-        
-        # # # run conformalized QR
-        # y_calib_true = val_dset.targets
-        # calibration_out = trainer.predict(model=model, dataloaders=val_loader)
-        # y_calib_preds = np.array([x[1].detach().numpy() for x in calibration_out]).squeeze()
-        
-        # # search for lower and upper predictions
-        # lower_idx = 0
-        # upper_idx = -1
-        # y_intervals_calib = y_preds_calib[:, [lower_idx, upper_idx]]
-        
-        # save predictions of CQR
-        
-        # evaluate CQR
-        
-        
-        
-        # y_medians = np.array([x[0].item() for x in results]).flatten().reshape(-1, 1)
-        # y_intervals = np.array([x[1].flatten().detach().numpy() for x in results])
-        # y_true = y_scaler.inverse_transform(y_true)
-        # y_medians = y_scaler.inverse_transform(y_medians)
-        # y_intervals = y_scaler.inverse_transform(y_intervals)
-        
-        # pd.DataFrame({'y_true': y_true.flatten(), 'y_pred': y_medians.flatten()}).to_csv("test.csv")
-        # metrics = uct.metrics.get_all_metrics(y_means, predictions_std, y_true)
+        y_preds_testset = np.hstack((y_true_test, y_preds_mean_test, y_preds_quantiles_test))
+        y_preds_testset_df = pd.DataFrame(data=y_preds_testset, columns=columns, index=test_dset.smiles)
+        y_preds_testset_df.to_csv("JMQR_predictions_IVIT_fold0_testset.csv")
+        y_preds_testset_inv = y_scaler.inverse_transform(y_preds_testset)
+        y_preds_testset_inv_df = pd.DataFrame(data=y_preds_testset_inv, columns=columns, index=test_dset.smiles)
+        y_preds_testset_inv_df.to_csv("JMQR_predictions_IVIT_fold0_testset_inv.csv")
                 
     
     elif args.ue == "MCD":
@@ -425,15 +375,14 @@ def main(args):
 
 
     elif args.ue == "DE":
-        model = models.DeepEnsembleMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3,num_models=5)
+        model = models.DeepEnsembleMPNN(mpn_block=molenc, n_tasks=1, ffn_num_layers=3, num_models=5)
         callbacks = [EarlyStopping(monitor="val/loss", mode="min")] 
         trainer = pl.Trainer(
-            # logger=False,
             enable_checkpointing=False,
             enable_progress_bar=True,
             accelerator="gpu",
             devices=1,
-            max_epochs=100,
+            max_epochs=200,
             log_every_n_steps=30,
             callbacks=callbacks
         )
@@ -496,12 +445,10 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, help="Name of dataset", default='VDss_Liu2022')
     parser.add_argument("--split", type=str, help="Name of split strategy, could be 'IVIT', 'IVOT', or 'OVOT'", default='IVIT')
     parser.add_argument("--fold", type=int, help="Index of CV fold", default=0)
-    parser.add_argument("--ue", type=str, help="Name of uncertainty estimation method")
-    parser.add_argument("--batch_size", type=int, help="Batch size", default=50)
-    parser.add_argument("--conformal", type=bool, help="Run conformal prediction or not", default=False)
-    parser.add_argument("--alpha", type=float, help="Expected coverage rate", default=0.1)
-    methods = ["QR"]
-    DataSets = ["Lipophilicity_Wang2020"]
+    parser.add_argument("--ue", type=str, help="Name of uncertainty estimation method", default="JMQR")
+    parser.add_argument("--batch_size", type=int, help="Batch size", default=50)    
+    methods = ["JMQR"]
+    DataSets = ["hPPB_Lou2022"]
     SPlit = ['IVIT']
     for k in SPlit:
         for j in DataSets:

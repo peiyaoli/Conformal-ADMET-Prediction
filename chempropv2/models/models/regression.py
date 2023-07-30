@@ -1,16 +1,27 @@
 import torch
-import pytorch_lightning as pl
+import lightning.pytorch as pl
+import numpy as np
 from torch import Tensor
 from torch.nn import functional as F
 from chempropv2.data.dataloader import TrainingBatch
 from chempropv2.models.models.base import MPNN
 from chempropv2.utils import find_nearest
 from typing import Optional
+from chempropv2.models.utils import rearrange
+from chempropv2.models.metrics import MPIWMetric
 
 class RegressionMPNN(MPNN):
     _DATASET_TYPE = "regression"
     _DEFAULT_CRITERION = "mse"
     _DEFAULT_METRIC = "rmse"
+    def validation_step(self, batch: TrainingBatch, batch_idx):
+        bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
+        preds = super().predict_step(batch, batch_idx)[0]
+        mask = torch.ones((len(targets), 1), device=targets.device)
+        val_loss = self.criterion(
+            preds, targets, mask, w_d=weights, lt_targets=lt_targets, gt_targets=gt_targets
+        )
+        self.log_dict({"val/loss": val_loss}, on_epoch=True, batch_size=len(targets), prog_bar=True)
 
 
 class MveRegressionMPNN(RegressionMPNN):
@@ -33,6 +44,15 @@ class MveRegressionMPNN(RegressionMPNN):
         Y_mean, Y_var = Y.split(Y.shape[1] // 2, dim=1)
 
         return Y_mean, Y_var
+    
+    def validation_step(self, batch: TrainingBatch, batch_idx) -> tuple[list[Tensor], int]:
+        bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
+        preds = super().predict_step(batch, batch_idx)[0]
+        mask = torch.ones((len(targets), 1), device=targets.device)
+        val_loss = self.criterion(
+            preds, targets, mask, w_d=weights, lt_targets=lt_targets, gt_targets=gt_targets
+        )
+        self.log_dict({"val/loss": val_loss}, on_epoch=True, batch_size=len(targets), prog_bar=True)
 
 
 class EvidentialMPNN(RegressionMPNN):
@@ -57,6 +77,15 @@ class EvidentialMPNN(RegressionMPNN):
         means, lambdas, alphas, betas = Y.split(Y.shape[1] // 4, 1)
 
         return means, lambdas, alphas, betas
+    
+    def validation_step(self, batch: TrainingBatch, batch_idx) -> tuple[list[Tensor], int]:
+        bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
+        preds = super().predict_step(batch, batch_idx)[0]
+        mask = torch.ones((len(targets), 1), device=targets.device)
+        val_loss = self.criterion(
+            preds, targets, mask, w_d=weights, lt_targets=lt_targets, gt_targets=gt_targets
+        )
+        self.log_dict({"val/loss": val_loss}, on_epoch=True, batch_size=len(targets), prog_bar=True)
 
 
 
@@ -78,10 +107,10 @@ class DeepEnsembleMPNN(pl.LightningModule):
         for model in self.models:
             preds = model((bmg, X_vd), X_f=features)
             loss = F.mse_loss(preds, targets)
-            losses.append(loss)
+            losses.append(loss * weights)
 
         loss = torch.stack(losses).mean()
-        self.log("train/loss", loss, prog_bar=True)
+        self.log("train/loss", loss, prog_bar=True, batch_size=len(targets))
 
         return loss
 
@@ -92,10 +121,10 @@ class DeepEnsembleMPNN(pl.LightningModule):
         for model in self.models:
             preds = model((bmg, X_vd), X_f=features)
             loss = F.mse_loss(preds, targets)
-            losses.append(loss)
+            losses.append(loss * weights)
 
         loss = torch.stack(losses).mean()
-        self.log("val/loss", loss, prog_bar=True)
+        self.log("val/loss", loss, prog_bar=True, sync_dist=True,  batch_size=len(targets))
 
     def predict_step(self, batch, batch_idx):
         bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
@@ -114,34 +143,29 @@ class DeepEnsembleMPNN(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
 
-
-
-class QuantileRegressionMPNN(MPNN):
+class JointMeanQuantileRegressionMPNN(MPNN):
     _DATASET_TYPE = "regression"
-    _DEFAULT_CRITERION = "pinball"
+    _DEFAULT_CRITERION = "jmq"
     _DEFAULT_METRIC = "mpiw"
     
-    def __init__(self, quantiles: torch.Tensor = None, n_tasks: int = None, no_crossing: bool = True, **kwargs):
+    def __init__(self, quantiles: torch.Tensor = None, n_tasks: int = None, **kwargs):
         super().__init__(n_tasks=n_tasks, **kwargs)
         self.quantiles = quantiles
-        self.no_crossing = no_crossing
-    
+        
     def forward(self, inputs, X_f) -> Tensor:
         Y = super().forward(inputs, X_f)
-        if self.no_crossing:
-            Y, _ = torch.sort(Y, dim=1)
         return Y
-    
+
     def training_step(self, batch: TrainingBatch, batch_idx):
         bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
 
-        mask = torch.ones((len(targets), self.n_tasks), device=targets.device)
+        mask = torch.ones((len(targets), 1), device=targets.device)
         targets = targets.nan_to_num(nan=0.0)
 
         preds = self((bmg, X_vd), X_f=features)
-
+        
         l = self.criterion(
-            preds, targets, mask, weights=weights, lt_targets=lt_targets, gt_targets=gt_targets, quantiles=self.quantiles
+            preds, targets, mask, w_d=weights, lt_targets=lt_targets, gt_targets=gt_targets, quantiles=self.quantiles
         )
         self.log("train/loss", l, prog_bar=True)
 
@@ -150,43 +174,77 @@ class QuantileRegressionMPNN(MPNN):
     def validation_step(self, batch: TrainingBatch, batch_idx) -> tuple[list[Tensor], int]:
         bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
         preds = super().predict_step(batch, batch_idx)[0]
-        mask = torch.ones((len(targets), self.n_tasks), device=targets.device)
+        mask = torch.ones((len(targets), 1), device=targets.device)
         val_loss = self.criterion(
-            preds, targets, mask, weights=weights, lt_targets=lt_targets, gt_targets=gt_targets, quantiles=self.quantiles
+            preds, targets, mask, w_d=weights, lt_targets=lt_targets, gt_targets=gt_targets, quantiles=self.quantiles
         )
         self.log_dict({"val/loss": val_loss}, on_epoch=True, batch_size=len(targets), prog_bar=True)
+        
+    def predict_step(self, batch, batch_idx):
+        y_preds = super().predict_step(batch, batch_idx)[0]
+        y_means = y_preds[:, 0].unsqueeze(1) # n x 1
+        y_quantiles = y_preds[:, 1:] # n x q
+        return y_means, y_quantiles
+
+class JointQuantileRegressionMPNN(MPNN):
+    _DATASET_TYPE = "regression"
+    _DEFAULT_CRITERION = "jq"
+    _DEFAULT_METRIC = "mpiw"
+    
+    def __init__(self, quantiles: torch.Tensor = None, n_tasks: int = None, **kwargs):
+        super().__init__(n_tasks=n_tasks, **kwargs)
+        self.quantiles = quantiles
+    
+    def forward(self, inputs, X_f) -> Tensor:
+        Y = super().forward(inputs, X_f)
+        return Y
+    
+    def training_step(self, batch: TrainingBatch, batch_idx):
+        bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
+
+        mask = torch.ones((len(targets), len(self.quantiles)), device=targets.device)
+        targets = targets.nan_to_num(nan=0.0)
+
+        preds = self((bmg, X_vd), X_f=features)
+        
+        l = self.criterion(
+            preds, targets, mask, w_d=weights, lt_targets=lt_targets, gt_targets=gt_targets, quantiles=self.quantiles
+        )
+        self.log("train/loss", l, prog_bar=True)
+
+        return l
+    
+    def validation_step(self, batch: TrainingBatch, batch_idx) -> tuple[list[Tensor], int]:
+        bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
+        preds = super().predict_step(batch, batch_idx)[0]
+        mask = torch.ones((len(targets), 1), device=targets.device)
+        val_loss = self.criterion(
+            preds, targets, mask, w_d=weights, lt_targets=lt_targets, gt_targets=gt_targets, quantiles=self.quantiles
+        )
+        self.log_dict({"val/loss": val_loss}, on_epoch=True, batch_size=len(targets), prog_bar=True, sync_dist=True)
     
     def predict_step(self, batch, batch_idx):
         bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
-        y_latent = super().encoding((bmg, X_vd), X_f=features)
         y_preds = super().predict_step(batch, batch_idx)[0]
-        y_medians = torch.quantile(y_preds, dim=1, q=0.5)
-        return y_medians, y_preds, y_latent
-    
-    
+        return y_preds
+        
 class MCDropoutMPNN(RegressionMPNN):
 
     _DEFAULT_CRITERION = "mse"
 
     def add_mc_iteration(self, mc_iteration):
         self.mc_iteration = mc_iteration
-        self.Dropout = torch.nn.Dropout(p = 0.5) 
+        self.Dropout = torch.nn.Dropout(p = 0.2) 
 
 
     def validation_step(self, batch: TrainingBatch, batch_idx: int = 0) -> tuple[list[Tensor], int]:
         bmg, X_vd, features, targets, weights, lt_targets, gt_targets = batch
-
-        preds = self((bmg, X_vd), X_f=features)
-
-        mask = targets.isfinite()
-        targets = targets.nan_to_num(nan=0.0)
-
-        losses = [
-            metric(preds, targets, mask, lt_targets=lt_targets, gt_targets=gt_targets)
-            for metric in self.metrics
-        ]
-        metric2loss = {f"val/{m.alias}": l for m, l in zip(self.metrics, losses)}
-        self.log_dict(metric2loss, on_epoch=True, batch_size=len(targets), prog_bar=True)
+        preds = super().predict_step(batch, batch_idx)[0]
+        mask = torch.ones((len(targets), 1), device=targets.device)
+        val_loss = self.criterion(
+            preds, targets, mask, w_d=weights, lt_targets=lt_targets, gt_targets=gt_targets
+        )
+        self.log_dict({"val/loss": val_loss}, on_epoch=True, batch_size=len(targets), prog_bar=True, sync_dist=True)
     
 
     def predict_step(self, batch, batch_idx):

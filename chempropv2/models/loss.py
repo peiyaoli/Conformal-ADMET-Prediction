@@ -338,8 +338,39 @@ class WassersteinSpectralLoss(SpectralLoss):
         return (targets.cumsum(1) - preds_norm.cumsum(1)).abs()
 
 
-class PinballLoss(LossFunction):
-    alias = "regression-pinball"
+class WeightedJointMeanQuantileLoss(LossFunction):
+    alias = "regression-wjmq"
+    def clac(self, preds: Tensor, targets: Tensor, **kwargs):
+        quantiles = kwargs["quantiles"].to(device=preds.device)
+        weights = kwargs["weights"].to(device=preds.device) # 1 x (q+1)
+        preds_mean = preds[:, 0].unsqueeze(1) # n x 1
+        preds_quantiles = preds[:, 1:] # n x q
+        l2_loss = torch.square(preds_mean - targets) # n x 1
+        errors = targets - preds_quantiles # n x q  
+        Q = quantiles.unsqueeze(0)
+        q_loss = torch.max((Q - 1.0) * errors, Q * errors) # n x q
+        loss_tensor = weights * torch.hstack([l2_loss, q_loss]) # n x (q+1)
+        loss = loss_tensor[:, 0].unsqueeze(1) + loss_tensor[:, 1:].sum(dim=1, keepdim=True)
+        weights_updated = loss_tensor.mean(dim=0, keepdim=True)
+        return loss, weights_updated
+
+class JointMeanQuantileLoss(LossFunction):
+    alias = "regression-jmq"
+    def calc(self, preds: Tensor, targets: Tensor, **kwargs):
+        quantiles = kwargs["quantiles"].to(device=preds.device)
+        preds_mean = preds[:, 0].unsqueeze(1) # n x 1
+        preds_quantiles = preds[:, 1:] # n x q
+        loss = torch.square(preds_mean - targets) # n x 1
+        errors = targets - preds_quantiles # n x q        
+        Q = quantiles.unsqueeze(0)
+        loss += torch.max((Q - 1.0) * errors, Q * errors).sum(dim=1, keepdim=True)
+        #loss += (Q * errors + torch.clamp(-errors, 1e-10, np.inf)).sum(dim=1, keepdim=True)        
+        return loss
+        
+
+class JointQuantileLoss(LossFunction):
+    # loss function of naive all quantile loss
+    alias = "regression-jq"
 
     def calc(self, preds: Tensor, targets: Tensor, **kwargs) -> Tensor:
         quantiles = kwargs["quantiles"].to(device=preds.device)
@@ -371,66 +402,6 @@ class SmoothPinballLoss(LossFunction):
         penalty = torch.max(torch.Tensor([0]).to(device=preds.device), preds_diff).square().mean(dim=1, keepdim=True)
         loss += self.lamb * penalty
         return loss
-
-
-class HuberPinballLoss(LossFunction):
-    alias = "regression-huberpinball"
-
-    def calc(self, preds, targets, **kwargs):
-        quantiles = kwargs["quantiles"].to(device=preds.device)
-        alpha = kwargs["alpha"]
-        if alpha == 0.0:
-            return PinballLoss(preds, targets, quantiles)
-
-        errors = targets - preds
-        loss_data = torch.where(
-            torch.abs(errors) < alpha,
-            0.5 * errors * errors,
-            alpha * (torch.abs(errors) - 0.5 * alpha),
-        )
-        loss_data /= alpha
-
-        scale = torch.where(
-            errors >= 0,
-            torch.ones_like(errors) * quantiles,
-            torch.ones_like(errors) * (1 - quantiles),
-        )
-        loss_data *= scale
-        return loss_data
-
-
-# class ConfPinballLoss(LossFunction):
-#     alias = "regression-confpinball"
-
-#     def calc(self, preds, targets, **kwargs):
-#         quantile_grids = kwargs["quantile_grids"].to(device=preds.device)
-#         alpha = kwargs["alpha"]
-#         # lamb = kwargs["lamb"]
-#         # # perm = torch.randperm(preds.size(0))
-#         # # rand_idx = perm[:preds]
-#         # preds_cal = torch.chunk(preds, 2, dim=0)[0]
-#         # preds_pred = torch.chunk(preds, 2, dim=0)[1]
-#         # targets_cal = torch.chunk(targets, 2, dim=0)[0]
-#         # targets_pred = torch.chunk(targets, 2, dim=0)[1]
-#         # use preds_cal & targets_cal for CP NC tau calculatation
-#         #tau = nonconformity_score(preds_cal, targets_cal, alpha=alpha)
-#         # preds_cal_lo, preds_cal_hi = preds_cal[:, 0], preds_cal[:, -1]
-#         # preds_pred_lo, preds_pred_hi = preds_pred[:, 0], preds_pred[:, -1]
-#         # nc = torch.max(preds_cal_lo - targets_cal, targets_cal - preds_cal_hi)
-#         # nc_rank_idx = soft_rank(nc)
-#         # idx = (1 - alpha) * (1 + 1 / len(nc))
-#         # tau = nc_rank_idx[nc_rank_idx.ge(idx)]
-#         # preds_pred_lo -= tau
-#         # preds_pred_hi += tau
-#         #ineff_loss = preds_pred[:, -1] - preds_pred[:, 0] + 2 * tau
-#         #errors = preds_pred - targets_pred
-#         errors = preds = targets
-#         Q = quantile_grids.unsqueeze(0)
-#         pinball_loss = torch.max((Q - 1.0) * errors, Q * errors)
-#         #loss = ineff_loss + lamb * pinball_loss.mean(dim=1)
-#         loss = pinball_loss.mean(dim=1)
-#         return loss.unsqueeze(1)
-
 
 def build_loss(dataset_type: str, loss_function: str, **kwargs) -> LossFunction:
     key = f"{dataset_type.lower()}-{loss_function.lower()}"

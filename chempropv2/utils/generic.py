@@ -64,18 +64,18 @@ def _import_modules():
     except ModuleNotFoundError:
         pass
 
-    try:
-        import jax
-        import jax.numpy as jnp
+    # try:
+    #     import jax
+    #     import jax.numpy as jnp
 
-        _JAX_KEY = jax.random.PRNGKey(0)
-    except ModuleNotFoundError:
-        pass
+    #     _JAX_KEY = jax.random.PRNGKey(0)
+    # except ModuleNotFoundError:
+    #     pass
 
-    try:
-        import tensorflow as tf
-    except:
-        pass
+    # try:
+    #     import tensorflow as tf
+    # except:
+    #     pass
 
 
 def get_array_module(x):
