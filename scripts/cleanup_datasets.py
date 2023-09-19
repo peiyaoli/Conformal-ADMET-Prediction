@@ -5,7 +5,6 @@ from pathlib import Path
 
 import datamol as dm
 import pandas as pd
-from chembl_structure_pipeline import standardize_mol
 from rdkit import Chem, RDLogger
 from rdkit.Chem import PandasTools
 
@@ -55,11 +54,6 @@ DATASETS = {
         "filename": "Fang2023.csv",
         "X": "SMILES",
         "Y": "LOG RLM_CLint (mL/min/kg)",
-    },
-    "HalfLife_Liu2022": {
-        "filename": "Liu2022.xlsx",
-        "X": "SMILES",
-        "Y": "t_1/2",
     },
     "LD50_Lunghini2019": {
         "filename": "LD50_Lunghini2019.xlsx",

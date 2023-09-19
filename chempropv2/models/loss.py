@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch import Tensor
 from torch.nn import functional as F
-from torchsort import soft_sort
+#from torchsort import soft_sort
 from chempropv2.utils import RegistryMixin
 
 
@@ -416,18 +416,18 @@ def build_loss(dataset_type: str, loss_function: str, **kwargs) -> LossFunction:
         )
 
 
-def nonconformity_score(
-    y_preds: torch.Tensor, y_true: torch.Tensor, alpha: float = 0.1
-):
-    """Compute nonconformity score"""
-    # lower level
-    y_lower = y_preds[:, 0].unsqueeze(1)
-    # upper level
-    y_upper = y_preds[:, -1].unsqueeze(1)
-    error_low = y_lower - y_true
-    error_high = y_true - y_upper
-    nc = torch.maximum(error_high, error_low)
-    n = len(y_preds)
-    nc_sorted = soft_sort(nc.reshape(1, -1), regularization_strength=1e-5).flatten()
-    tau =  nc_sorted[int(n*(1.0-alpha))]
-    return tau
+# def nonconformity_score(
+#     y_preds: torch.Tensor, y_true: torch.Tensor, alpha: float = 0.1
+# ):
+#     """Compute nonconformity score"""
+#     # lower level
+#     y_lower = y_preds[:, 0].unsqueeze(1)
+#     # upper level
+#     y_upper = y_preds[:, -1].unsqueeze(1)
+#     error_low = y_lower - y_true
+#     error_high = y_true - y_upper
+#     nc = torch.maximum(error_high, error_low)
+#     n = len(y_preds)
+#     nc_sorted = soft_sort(nc.reshape(1, -1), regularization_strength=1e-5).flatten()
+#     tau =  nc_sorted[int(n*(1.0-alpha))]
+#     return tau

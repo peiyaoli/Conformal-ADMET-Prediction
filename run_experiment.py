@@ -10,17 +10,10 @@ from chempropv2.models import models, modules
 
 torch.set_float32_matmul_precision("medium")
 
-
-
 def main(args):
-    # set experiment info
-    if args.lds:
-        # default output directory
-        OUT_DIR = Path("experiments/LDS-on")
-    else:
-        OUT_DIR = Path("experiments/LDS-off")
+    out_dir = Path("experiments")
     experiment_name = f"{args.dataset}-{args.split}-fold{args.fold}-{args.ue}"
-    experiment_folder = OUT_DIR / experiment_name.replace("-", "/")
+    experiment_folder = out_dir / experiment_name.replace("-", "/")
     experiment_folder.mkdir(parents=True, exist_ok=True)
     print(f"Running experiments: {experiment_name}.")
     # load data loaders for experiments
@@ -28,12 +21,11 @@ def main(args):
                                                                                     split=args.split, 
                                                                                     fold_idx=args.fold, 
                                                                                     num_workers=args.num_workers, 
-                                                                                    batch_size=args.batch_size,
-                                                                                    lds=args.lds)
+                                                                                    batch_size=args.batch_size)
     # define molecular encoder
     molenc = modules.molecule_block()
     # define early stop callback
-    callbacks = [EarlyStopping(monitor="val/loss", mode="min", patience=10, )]
+    callbacks = [EarlyStopping(monitor="val/loss", mode="min", patience=10)]
     # define trainer
     trainer = pl.Trainer(
         logger=True,
@@ -119,16 +111,11 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Conformalized Molecular ADMET Properties Prediction")
     parser.add_argument("--dataset", type=str, help="Name of dataset", default='Solubility_Wang2020')
     parser.add_argument("--split", type=str, help="Name of split strategy, could be 'IVIT', 'IVOT', or 'OVOT'", default='OVOT')
-    parser.add_argument("--fold", type=int, help="Index of CV fold, 0 to 9", default=1)
-    parser.add_argument("--ue", type=str, help="Name of uncertainty estimation method", default="EDL")
+    parser.add_argument("--fold", type=int, help="Index of CV fold, 0 to 9", default=6)
+    parser.add_argument("--ue", type=str, help="Name of uncertainty estimation method", default="JQR")
     parser.add_argument("--batch_size", type=int, help="Batch size", default=50)
     parser.add_argument("--num_workers", type=int, help="Number of workers", default=6)
     parser.add_argument("--device", type=int, help="Index of CUDA device", default=1)
     parser.add_argument("--lds", type=bool, help="Label Density Smooth", default=False)
     args = parser.parse_args()
     main(args)
-    # for split in ["IVIT", "IVOT", "OVOT"]:
-    #     for f in range(9):
-    #         parser.set_defaults(fold=f, split=split)
-    #         args = parser.parse_args()
-    #         main(args)

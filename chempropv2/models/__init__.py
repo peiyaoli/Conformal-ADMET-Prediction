@@ -15,6 +15,7 @@ from .models import (
     RegressionMPNN,
     MveRegressionMPNN,
     SpectralMPNN,
-    QuantileRegressionMPNN,
+    JointMeanQuantileRegressionMPNN,
+    JointQuantileRegressionMPNN,
     MCDropoutMPNN
 )

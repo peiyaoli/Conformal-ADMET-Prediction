@@ -7,4 +7,4 @@
 
 source ~/.conda_init
 conda activate deepchem
-srun python run_experiment_LDS_on.py --dataset ${DATASET} --ue ${UE}
+srun python run_experiment.py --dataset ${DATASET} --ue ${UE}
